@@ -75,7 +75,7 @@ jobs:
             --region "$AWS_REGION" \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy $IMAGE_URI" \
+            --comment "Deploy app" \
             --parameters "commands=[
               \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY\",
               \"docker pull $IMAGE_URI\",
