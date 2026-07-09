@@ -1,0 +1,104 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+  APP_PORT: ${{ vars.APP_PORT }}
+  CONTAINER_NAME: app
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          LATEST_IMAGE_URI=$REGISTRY/$ECR_REPOSITORY:latest
+
+          docker build -t $IMAGE_URI -t $LATEST_IMAGE_URI ./app
+
+          docker push $IMAGE_URI
+          docker push $LATEST_IMAGE_URI
+
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      - name: Find EC2 instance
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --region "$AWS_REGION" \
+            --filters \
+              "Name=tag:Name,Values=$PROJECT_NAME-app" \
+              "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+
+          if [ "$INSTANCE_ID" = "None" ] || [ -z "$INSTANCE_ID" ]; then
+            echo "No running EC2 instance found"
+            exit 1
+          fi
+
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+
+      - name: Deploy container through SSM
+        run: |
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+
+          COMMAND_ID=$(aws ssm send-command \
+            --region "$AWS_REGION" \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy $IMAGE_URI" \
+            --parameters "commands=[
+              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY\",
+              \"docker pull $IMAGE_URI\",
+              \"docker stop $CONTAINER_NAME || true\",
+              \"docker rm $CONTAINER_NAME || true\",
+              \"docker run -d --name $CONTAINER_NAME --restart always -p $APP_PORT:$APP_PORT -e APP_VERSION=${{ github.sha }} $IMAGE_URI\",
+              \"docker image prune -af || true\"
+            ]" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "COMMAND_ID=$COMMAND_ID" >> $GITHUB_ENV
+
+      - name: Wait for SSM command
+        run: |
+          aws ssm wait command-executed \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID"
+
+      - name: Show deploy result
+        run: |
+          aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID"

@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euxo pipefail
+
+dnf update -y
+dnf install -y docker awscli
+
+systemctl enable docker
+systemctl start docker
+
+systemctl enable amazon-ssm-agent || true
+systemctl start amazon-ssm-agent || true
+
+usermod -aG docker ec2-user || true
+
+echo "EC2 bootstrap completed" > /var/log/devops-ec2-bootstrap.log
